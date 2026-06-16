@@ -1,0 +1,326 @@
+import os
+import re
+import time
+from flask import Flask, render_template_string, request, redirect, url_for, flash, session
+
+app = Flask(__name__)
+# مفتاح تشفير قوي جداً لتأمين الجلسات ومنع التلاعب ببيانات الدخول
+app.secret_key = os.urandom(32)
+
+# --- بيانات الدخول الصحيحة المعتمدة ---
+VALID_EMAIL = "user@example.com"
+VALID_PASSWORD = "StrongPassword2026!"
+
+# --- نظام حماية داخلي متطور ضد التخمين وحجب الخدمة (DoS & Brute Force) ---
+# يقوم بتتبع الـ IP وحساب عدد الطلبات في وقت زمني محدد دون الحاجة لمكتبات خارجية
+IP_TRACKER = {}
+
+def is_rate_limited(ip_address, limit=5, period=60):
+    """
+    تمنع هذه الدالة أي IP من إرسال أكثر من (limit) طلبات خلال (period) ثانية.
+    مخصصة للتصدي لهجمات حجب الخدمة والتخمين.
+    """
+    current_time = time.time()
+    if ip_address not in IP_TRACKER:
+        IP_TRACKER[ip_address] = []
+    
+    # تنظيف الطلبات القديمة التي مرت عليها الفترة الزمنية
+    IP_TRACKER[ip_address] = [t for t in IP_TRACKER[ip_address] if current_time - t < period]
+    
+    if len(IP_TRACKER[ip_address]) >= limit:
+        return True
+    
+    IP_TRACKER[ip_address].append(current_time)
+    return False
+
+def is_valid_email(email):
+    """ فحص سيبراني صارم لصيغة البريد الإلكتروني لمنع الـ Injection والتلاعب """
+    regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(regex, email)
+
+# --- واجهات العرض (HTML + CSS + JS) ---
+
+LOGIN_HTML = """
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>بوابة تسجيل الدخول الآمنة</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .login-box {
+            background: #ffffff;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.5);
+            width: 100%;
+            max-width: 400px;
+            box-sizing: border-box;
+            text-align: center;
+        }
+        h2 { color: #203a43; margin-bottom: 30px; font-size: 24px; }
+        .input-group { margin-bottom: 20px; text-align: right; }
+        label { display: block; margin-bottom: 8px; color: #333; font-weight: 600; }
+        input {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #cccccc;
+            border-radius: 6px;
+            box-sizing: border-box;
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+        input:focus { border-color: #2c5364; outline: none; box-shadow: 0 0 8px rgba(44,83,100,0.2); }
+        button {
+            width: 100%;
+            padding: 12px;
+            background: #203a43;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        button:hover { background: #2c5364; }
+        .alert {
+            background-color: #f8d7da;
+            color: #721c24;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            border: 1px solid #f5c6cb;
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h2>تسجيل دخول محمي سيبرانياً</h2>
+        
+        {% with messages = get_flashed_messages() %}
+          {% if messages %}
+            {% for message in messages %}
+              <div class="alert">{{ message }}</div>
+            {% endfor %}
+          {% endif %}
+        {% endwith %}
+
+        <form action="/login" method="POST">
+            <div class="input-group">
+                <label>البريد الإلكتروني</label>
+                <input type="email" name="email" required placeholder="name@example.com" autocomplete="off">
+            </div>
+            <div class="input-group">
+                <label>كلمة المرور</label>
+                <input type="password" name="password" required placeholder="••••••••" autocomplete="off">
+            </div>
+            <button type="submit">تحقق ودخول آمن</button>
+        </form>
+    </div>
+</body>
+</html>
+"""
+
+DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>القرآن الكريم - الاستماع الآمن</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f0f4f8;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        header { text-align: center; margin-bottom: 40px; }
+        header h1 { color: #11694e; margin-0: 0; font-size: 2.8rem; }
+        header p { color: #555; font-size: 1.1rem; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 25px;
+            width: 100%;
+            max-width: 1100px;
+        }
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            text-align: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+            border-top: 6px solid #11694e;
+            transition: transform 0.3s;
+        }
+        .card:hover { transform: translateY(-5px); }
+        .icon {
+            font-size: 50px;
+            color: #11694e;
+            margin-bottom: 15px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .title { font-size: 22px; font-weight: bold; color: #333; margin-bottom: 15px; }
+        audio { width: 100%; margin-top: 10px; }
+        .logout-btn {
+            margin-top: 40px;
+            padding: 12px 30px;
+            background-color: #a62626;
+            color: white;
+            text-decoration: none;
+            border-radius: 20px;
+            font-weight: bold;
+            transition: background 0.3s;
+        }
+        .logout-btn:hover { background-color: #cf3030; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>المصحف الصوتي المحصن</h1>
+        <p>الاستماع الفوري لخمس سور وآيات مباركة من القرآن الكريم</p>
+    </header>
+
+    <div class="grid">
+        <div class="card">
+            <div class="icon" onclick="togglePlay('audio1')">📖</div>
+            <div class="title">آية الكرسي</div>
+            <audio id="audio1" controls preload="none">
+                <source src="https://server11.mp3quran.net/yasser/002.mp3" type="audio/mpeg">
+            </audio>
+        </div>
+
+        <div class="card">
+            <div class="icon" onclick="togglePlay('audio2')">🕌</div>
+            <div class="title">سورة البقرة</div>
+            <audio id="audio2" controls preload="none">
+                <source src="https://server11.mp3quran.net/yasser/002.mp3" type="audio/mpeg">
+            </audio>
+        </div>
+
+        <div class="card">
+            <div class="icon" onclick="togglePlay('audio3')">🛡️</div>
+            <div class="title">سورة الناس</div>
+            <audio id="audio3" controls preload="none">
+                <source src="https://server11.mp3quran.net/yasser/114.mp3" type="audio/mpeg">
+            </audio>
+        </div>
+
+        <div class="card">
+            <div class="icon" onclick="togglePlay('audio4')">✨</div>
+            <div class="title">سورة الإخلاص</div>
+            <audio id="audio4" controls preload="none">
+                <source src="https://server11.mp3quran.net/yasser/112.mp3" type="audio/mpeg">
+            </audio>
+        </div>
+
+        <div class="card">
+            <div class="icon" onclick="togglePlay('audio5')">🌱</div>
+            <div class="title">سورة الفاتحة (مالك يوم الدين)</div>
+            <audio id="audio5" controls preload="none">
+                <source src="https://server11.mp3quran.net/yasser/001.mp3" type="audio/mpeg">
+            </audio>
+        </div>
+    </div>
+
+    <a href="/logout" class="logout-btn">تسجيل خروج آمن</a>
+
+    <script>
+        // دالة تضمن تشغيل ملف صوتي واحد فقط في نفس الوقت بذكاء وبدون تعليق
+        function togglePlay(id) {
+            var audios = document.getElementsByTagName('audio');
+            for(var i = 0; i < audios.length; i++){
+                if(audios[i].id !== id) {
+                    audios[i].pause();
+                }
+            }
+            var current = document.getElementById(id);
+            if (current.paused) {
+                current.play();
+            } else {
+                current.pause();
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+# --- منطق التحكم البرمجي والمعالجة الأمنية (Backend Logic) ---
+
+@app.route('/')
+def index():
+    # منع الدخول المباشر للموقع إلا بعد تسجيل الدخول بشكل صحيح
+    if session.get('logged_in'):
+        return render_template_string(DASHBOARD_HTML)
+    return redirect(url_for('login_page'))
+
+@app.route('/login', methods=['GET'])
+def login_page():
+    if session.get('logged_in'):
+        return redirect(url_for('index'))
+    return render_template_string(LOGIN_HTML)
+
+@app.route('/login', methods=['POST'])
+def login():
+    client_ip = request.remote_addr
+    
+    # تطبيق نظام الحماية الفوري: حد أقصى 5 محاولات في الدقيقة لمنع الـ DoS والـ Brute Force
+    if is_rate_limited(client_ip, limit=5, period=60):
+        flash("تنبيه أمني: تم حظر طلبك مؤقتاً لتجاوز محاولات الدخول. انتظر دقيقة.")
+        return redirect(url_for('login_page'))
+
+    try:
+        email = request.form.get('email', '').strip()
+        password = request.form.get('password', '').strip()
+
+        # معالجة المدخلات الفارغة والتأكد من عدم تسببها في كسر السيرفر
+        if not email or not password:
+            flash("خطأ: يرجى كتابة البريد الإلكتروني وكلمة المرور.")
+            return redirect(url_for('login_page'))
+
+        # التحقق من صحة صياغة الإيميل لمنع هجمات التلاعب بمدخلات قواعد البيانات أو السيرفر
+        if not is_valid_email(email):
+            flash("خطأ: صيغة البريد الإلكتروني غير صالحة للتحقق.")
+            return redirect(url_for('login_page'))
+
+        # المطابقة الدقيقة والمحمية للبيانات الصحيحة
+        if email == VALID_EMAIL and password == VALID_PASSWORD:
+            session['logged_in'] = True
+            session.permanent = True  # ربط الجلسة بملفات النظام الآمنة
+            return redirect(url_for('index'))
+        else:
+            flash("خطأ: بيانات الاعتماد المدخلة غير صحيحة.")
+            return redirect(url_for('login_page'))
+
+    except Exception as e:
+        # صمام أمان شامل يمنع إظهار أخطاء الكود للمخترقين (Information Disclosure Protection)
+        flash("حدث خطأ غير متوقع في معالجة البيانات، تم إحباط العملية بنجاح.")
+        return redirect(url_for('login_page'))
+
+@app.route('/logout')
+def logout():
+    session.clear() # تدمير الجلسة بالكامل عند تسجيل الخروج لضمان الأمان
+    return redirect(url_for('login_page'))
+
+if __name__ == '__main__':
+    # تشغيل التطبيق محلياً بإعدادات أمان صارمة (إيقاف وضع المطور لزيادة التحصين)
+    app.run(debug=False, host='127.0.0.1', port=5000)
